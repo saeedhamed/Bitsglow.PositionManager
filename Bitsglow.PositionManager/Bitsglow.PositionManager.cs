@@ -69,7 +69,17 @@ namespace cAlgo.Robots
         [Parameter("Tick Delay (ms)", DefaultValue = 10, MinValue = 0, Group = "Backtest Slow Motion")]
         public int TickDelayMs { get; set; }
 
+        [Parameter("ADX Period", DefaultValue = 14, MinValue = 1, Group = "ADX Trend")]
+        public int AdxPeriod { get; set; }
+
+        [Parameter("Trend Level", DefaultValue = 25, MinValue = 10, MaxValue = 60, Group = "ADX Trend")]
+        public int AdxTrendLevel { get; set; }
+
+        [Parameter("Strong Level", DefaultValue = 40, MinValue = 20, MaxValue = 80, Group = "ADX Trend")]
+        public int AdxStrongLevel { get; set; }
+
         private AverageTrueRange _atr;
+        private DirectionalMovementSystem _dms;
         private readonly Random _random = new Random();
         private int _lossStreak;
         private DateTime _lastSessionDrawDay = DateTime.MinValue;
@@ -77,6 +87,7 @@ namespace cAlgo.Robots
         private bool? _wasInSession;
 
         private TextBlock _sessionText;
+        private TextBlock _trendText;
         private TextBlock _riskText;
         private TextBlock _recoveryText;
         private TextBlock _slowMotionText;
@@ -86,6 +97,7 @@ namespace cAlgo.Robots
         protected override void OnStart()
         {
             _atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Exponential);
+            _dms = Indicators.DirectionalMovementSystem(AdxPeriod);
 
             RestoreLossStreakFromHistory();
             Positions.Closed += OnPositionClosed;
@@ -291,12 +303,14 @@ namespace cAlgo.Robots
 
             _sessionText = MakeLine(13);
             _sessionText.FontWeight = FontWeight.Bold;
+            _trendText = MakeLine(12);
             _riskText = MakeLine(12);
             _recoveryText = MakeLine(12);
             _slowMotionText = MakeLine(12);
             _slowMotionText.IsVisible = IsBacktesting;
 
             panel.AddChild(_sessionText);
+            panel.AddChild(_trendText);
             panel.AddChild(_riskText);
             panel.AddChild(_recoveryText);
             panel.AddChild(_slowMotionText);
@@ -350,6 +364,8 @@ namespace cAlgo.Robots
                     ? Color.FromArgb(255, 255, 170, 60)
                     : Color.FromArgb(255, 80, 220, 120);
 
+            UpdateTrendText();
+
             var riskLabel = Sizing == SizingMode.FixedVolume
                 ? "fixed"
                 : Sizing == SizingMode.FixedLoss
@@ -370,6 +386,28 @@ namespace cAlgo.Robots
                     ? Color.FromArgb(255, 90, 180, 255)
                     : Color.FromArgb(140, 255, 255, 255);
             }
+        }
+
+        // ADX trend category: RANGE below Trend Level; direction from DI+ vs DI-;
+        // STRONG above Strong Level.
+        private void UpdateTrendText()
+        {
+            var adx = _dms.ADX.LastValue;
+            var bullish = _dms.DIPlus.LastValue > _dms.DIMinus.LastValue;
+
+            if (adx < AdxTrendLevel)
+            {
+                _trendText.Text = string.Format("RANGE      {0:0}", adx);
+                _trendText.ForegroundColor = Color.FromArgb(140, 255, 255, 255);
+                return;
+            }
+
+            var strong = adx >= AdxStrongLevel;
+            _trendText.Text = string.Format("{0}{1}  {2:0}",
+                strong ? "STRONG " : "", bullish ? "BUY" : "SELL", adx);
+            _trendText.ForegroundColor = bullish
+                ? (strong ? Color.FromArgb(255, 60, 255, 120) : Color.FromArgb(255, 120, 200, 140))
+                : (strong ? Color.FromArgb(255, 255, 70, 70) : Color.FromArgb(255, 220, 120, 120));
         }
 
         protected override void OnStop()
