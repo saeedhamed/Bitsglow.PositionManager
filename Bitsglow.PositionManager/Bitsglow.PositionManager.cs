@@ -21,12 +21,6 @@ namespace cAlgo.Robots
             AtrMultiple
         }
 
-        public enum EntryMode
-        {
-            AdxTrend,
-            TrendPullback
-        }
-
         private const string TradeLabel = "Bitsglow.PositionManager";
         private const int SessionDrawDays = 15;
 
@@ -75,42 +69,14 @@ namespace cAlgo.Robots
         [Parameter("Tick Delay (ms)", DefaultValue = 10, MinValue = 0, Group = "Backtest Slow Motion")]
         public int TickDelayMs { get; set; }
 
-        [Parameter("ADX Period", DefaultValue = 14, MinValue = 1, Group = "ADX Trend")]
-        public int AdxPeriod { get; set; }
-
-        [Parameter("Trend Level", DefaultValue = 25, MinValue = 10, MaxValue = 60, Group = "ADX Trend")]
-        public int AdxTrendLevel { get; set; }
-
-        [Parameter("Strong Level", DefaultValue = 40, MinValue = 20, MaxValue = 80, Group = "ADX Trend")]
-        public int AdxStrongLevel { get; set; }
-
-        [Parameter("Auto Trade", DefaultValue = false, Group = "Auto Entry")]
-        public bool AutoTradeEnabled { get; set; }
-
-        [Parameter("Entry Signal", DefaultValue = EntryMode.TrendPullback, Group = "Auto Entry")]
-        public EntryMode EntrySignal { get; set; }
-
-        [Parameter("Fast EMA", DefaultValue = 20, MinValue = 1, Group = "Auto Entry")]
-        public int FastEmaPeriod { get; set; }
-
-        [Parameter("Slow EMA", DefaultValue = 50, MinValue = 1, Group = "Auto Entry")]
-        public int SlowEmaPeriod { get; set; }
-
         private AverageTrueRange _atr;
-        private DirectionalMovementSystem _dms;
-        private ExponentialMovingAverage _emaFast;
-        private ExponentialMovingAverage _emaSlow;
-        private TradeType? _armed;
         private readonly Random _random = new Random();
         private int _lossStreak;
         private DateTime _lastSessionDrawDay = DateTime.MinValue;
         private bool _slowMotion;
         private bool? _wasInSession;
-        private bool _autoTrade;
 
         private TextBlock _sessionText;
-        private TextBlock _trendText;
-        private TextBlock _autoText;
         private TextBlock _riskText;
         private TextBlock _recoveryText;
         private TextBlock _slowMotionText;
@@ -120,10 +86,6 @@ namespace cAlgo.Robots
         protected override void OnStart()
         {
             _atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Exponential);
-            _dms = Indicators.DirectionalMovementSystem(AdxPeriod);
-            _emaFast = Indicators.ExponentialMovingAverage(Bars.ClosePrices, FastEmaPeriod);
-            _emaSlow = Indicators.ExponentialMovingAverage(Bars.ClosePrices, SlowEmaPeriod);
-            _autoTrade = AutoTradeEnabled;
 
             RestoreLossStreakFromHistory();
             Positions.Closed += OnPositionClosed;
@@ -134,7 +96,6 @@ namespace cAlgo.Robots
                 Chart.AddHotkey(_ => PlaceOrder(TradeType.Sell), Key.S, ModifierKeys.None);
                 Chart.AddHotkey(_ => PlaceOrder(_random.Next(2) == 0 ? TradeType.Buy : TradeType.Sell), Key.R, ModifierKeys.None);
                 Chart.AddHotkey(_ => ToggleSlowMotion(), Key.D, ModifierKeys.None);
-                Chart.AddHotkey(_ => ToggleAutoTrade(), Key.A, ModifierKeys.None);
                 DrawSessionHighlight();
                 CreateRiskBox();
                 UpdateRiskBox();
@@ -155,75 +116,8 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
-            AutoTrade();
-
             if (Chart != null && Bars.OpenTimes.LastValue.Date != _lastSessionDrawDay)
                 DrawSessionHighlight();
-        }
-
-        private void AutoTrade()
-        {
-            var signal = DetectEntrySignal();
-            if (signal == null || !_autoTrade)
-                return;
-            if (Positions.Find(TradeLabel, SymbolName) != null || !IsWithinSession(Server.Time))
-                return;
-
-            PlaceOrder(signal.Value);
-        }
-
-        // Evaluated once per bar close on the last completed bar.
-        private TradeType? DetectEntrySignal()
-        {
-            var i = Bars.Count - 2;
-            if (i < 1)
-                return null;
-
-            if (EntrySignal == EntryMode.AdxTrend)
-            {
-                if (_dms.ADX[i] < AdxTrendLevel)
-                    return null;
-                return _dms.DIPlus[i] > _dms.DIMinus[i] ? TradeType.Buy : TradeType.Sell;
-            }
-
-            // TrendPullback: with EMA fast/slow trend and ADX strength, a pullback
-            // touching the fast EMA arms the setup; a bar resuming the trend
-            // (closing beyond the fast EMA without touching it) fires one entry.
-            var fast = _emaFast.Result[i];
-            var slow = _emaSlow.Result[i];
-            var close = Bars.ClosePrices[i];
-            var adxOk = _dms.ADX[i] >= AdxTrendLevel;
-            var upTrend = fast > slow && close > slow;
-            var downTrend = fast < slow && close < slow;
-
-            if ((_armed == TradeType.Buy && !upTrend) || (_armed == TradeType.Sell && !downTrend))
-                _armed = null;
-
-            if (upTrend && adxOk && Bars.LowPrices[i] <= fast)
-                _armed = TradeType.Buy;
-            else if (downTrend && adxOk && Bars.HighPrices[i] >= fast)
-                _armed = TradeType.Sell;
-
-            if (_armed == TradeType.Buy && Bars.LowPrices[i] > fast && close > Bars.OpenPrices[i])
-            {
-                _armed = null;
-                return TradeType.Buy;
-            }
-
-            if (_armed == TradeType.Sell && Bars.HighPrices[i] < fast && close < Bars.OpenPrices[i])
-            {
-                _armed = null;
-                return TradeType.Sell;
-            }
-
-            return null;
-        }
-
-        private void ToggleAutoTrade()
-        {
-            _autoTrade = !_autoTrade;
-            Print("Auto trade {0}.", _autoTrade ? "ON" : "OFF");
-            UpdateRiskBox();
         }
 
         private void ToggleSlowMotion()
@@ -397,18 +291,14 @@ namespace cAlgo.Robots
 
             _sessionText = MakeLine(13);
             _sessionText.FontWeight = FontWeight.Bold;
-            _trendText = MakeLine(12);
             _riskText = MakeLine(12);
             _recoveryText = MakeLine(12);
-            _autoText = MakeLine(12);
             _slowMotionText = MakeLine(12);
             _slowMotionText.IsVisible = IsBacktesting;
 
             panel.AddChild(_sessionText);
-            panel.AddChild(_trendText);
             panel.AddChild(_riskText);
             panel.AddChild(_recoveryText);
-            panel.AddChild(_autoText);
             panel.AddChild(_slowMotionText);
 
             var box = new Border
@@ -460,8 +350,6 @@ namespace cAlgo.Robots
                     ? Color.FromArgb(255, 255, 170, 60)
                     : Color.FromArgb(255, 80, 220, 120);
 
-            UpdateTrendText();
-
             var riskLabel = Sizing == SizingMode.FixedVolume
                 ? "fixed"
                 : Sizing == SizingMode.FixedLoss
@@ -473,11 +361,6 @@ namespace cAlgo.Robots
             _recoveryText.Text = string.Format("RECOVERY ×{0}", multiplier);
             _recoveryText.ForegroundColor = Color.FromArgb(255, 255, 170, 60);
 
-            _autoText.Text = _autoTrade ? "AUTO ON     [A]" : "AUTO OFF    [A]";
-            _autoText.ForegroundColor = _autoTrade
-                ? Color.FromArgb(255, 90, 180, 255)
-                : Color.FromArgb(140, 255, 255, 255);
-
             if (IsBacktesting)
             {
                 _slowMotionText.Text = _slowMotion
@@ -487,29 +370,6 @@ namespace cAlgo.Robots
                     ? Color.FromArgb(255, 90, 180, 255)
                     : Color.FromArgb(140, 255, 255, 255);
             }
-        }
-
-        // ADX trend category: RANGE below Trend Level; direction from DI+ vs DI-;
-        // STRONG above Strong Level.
-        private void UpdateTrendText()
-        {
-            var adx = _dms.ADX.LastValue;
-            var bullish = _dms.DIPlus.LastValue > _dms.DIMinus.LastValue;
-
-            if (adx < AdxTrendLevel)
-            {
-                _trendText.Text = string.Format("RANGE      {0:0}", adx);
-                _trendText.ForegroundColor = Color.FromArgb(140, 255, 255, 255);
-                return;
-            }
-
-            var strong = adx >= AdxStrongLevel;
-            _trendText.Text = string.Format("{0}{1}  {2:0}{3}",
-                strong ? "STRONG " : "", bullish ? "BUY" : "SELL", adx,
-                _armed != null ? " ·PB" : "");
-            _trendText.ForegroundColor = bullish
-                ? (strong ? Color.FromArgb(255, 60, 255, 120) : Color.FromArgb(255, 120, 200, 140))
-                : (strong ? Color.FromArgb(255, 255, 70, 70) : Color.FromArgb(255, 220, 120, 120));
         }
 
         protected override void OnStop()
