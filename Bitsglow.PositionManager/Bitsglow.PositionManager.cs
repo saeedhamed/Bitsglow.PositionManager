@@ -69,16 +69,36 @@ namespace cAlgo.Robots
         [Parameter("Tick Delay (ms)", DefaultValue = 10, MinValue = 0, Group = "Backtest Slow Motion")]
         public int TickDelayMs { get; set; }
 
+        [Parameter("Enable Signal", DefaultValue = true, Group = "Holy Grail Signal")]
+        public bool SignalEnabled { get; set; }
+
+        [Parameter("ADX Period", DefaultValue = 14, MinValue = 1, Group = "Holy Grail Signal")]
+        public int AdxPeriod { get; set; }
+
+        [Parameter("ADX Threshold", DefaultValue = 30, MinValue = 10, MaxValue = 60, Group = "Holy Grail Signal")]
+        public int AdxThreshold { get; set; }
+
+        [Parameter("Signal EMA Period", DefaultValue = 20, MinValue = 1, Group = "Holy Grail Signal")]
+        public int SignalEmaPeriod { get; set; }
+
         private AverageTrueRange _atr;
+        private DirectionalMovementSystem _dms;
+        private ExponentialMovingAverage _ema;
         private readonly Random _random = new Random();
         private int _lossStreak;
         private DateTime _lastSessionDrawDay = DateTime.MinValue;
         private bool _slowMotion;
         private bool? _wasInSession;
 
+        private TradeType? _pendingSignal;
+        private double _triggerPrice;
+        private TradeType? _firedSignal;
+        private int _signalCount;
+
         private TextBlock _sessionText;
         private TextBlock _riskText;
         private TextBlock _recoveryText;
+        private TextBlock _signalText;
         private TextBlock _slowMotionText;
 
         private bool AllDay => StartHour == 0 && EndHour == 0;
@@ -86,6 +106,8 @@ namespace cAlgo.Robots
         protected override void OnStart()
         {
             _atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Exponential);
+            _dms = Indicators.DirectionalMovementSystem(AdxPeriod);
+            _ema = Indicators.ExponentialMovingAverage(Bars.ClosePrices, SignalEmaPeriod);
 
             RestoreLossStreakFromHistory();
             Positions.Closed += OnPositionClosed;
@@ -108,6 +130,7 @@ namespace cAlgo.Robots
         protected override void OnTick()
         {
             AutoToggleSlowMotion();
+            CheckSignalTrigger();
             UpdateRiskBox();
 
             if (IsBacktesting && _slowMotion && TickDelayMs > 0)
@@ -116,8 +139,76 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
+            UpdateHolyGrailSetup();
+
             if (Chart != null && Bars.OpenTimes.LastValue.Date != _lastSessionDrawDay)
                 DrawSessionHighlight();
+        }
+
+        // Raschke "Holy Grail": ADX above threshold and rising, pullback touches the EMA,
+        // entry trigger = break of the touch bar's extreme. Evaluated on the last closed bar.
+        private void UpdateHolyGrailSetup()
+        {
+            if (!SignalEnabled)
+                return;
+
+            var i = Bars.Count - 2;
+            if (i < 1)
+                return;
+
+            var adx = _dms.ADX[i];
+            var adxRising = adx > _dms.ADX[i - 1];
+            var trendUp = _dms.DIPlus[i] > _dms.DIMinus[i];
+
+            // Setup is void when trend strength fades or direction flips.
+            if (adx < AdxThreshold - 5 ||
+                (_pendingSignal == TradeType.Buy && !trendUp) ||
+                (_pendingSignal == TradeType.Sell && trendUp))
+                _pendingSignal = null;
+
+            if (adx <= AdxThreshold || !adxRising)
+                return;
+
+            var ema = _ema.Result[i];
+            var touchedEma = Bars.LowPrices[i] <= ema && ema <= Bars.HighPrices[i];
+
+            if (touchedEma)
+            {
+                _pendingSignal = trendUp ? TradeType.Buy : TradeType.Sell;
+                _triggerPrice = trendUp ? Bars.HighPrices[i] : Bars.LowPrices[i];
+                _firedSignal = null;
+            }
+            else if (_pendingSignal == TradeType.Buy && Bars.HighPrices[i] < _triggerPrice)
+                _triggerPrice = Bars.HighPrices[i];   // untriggered: trail the trigger down lower highs
+            else if (_pendingSignal == TradeType.Sell && Bars.LowPrices[i] > _triggerPrice)
+                _triggerPrice = Bars.LowPrices[i];
+        }
+
+        private void CheckSignalTrigger()
+        {
+            if (_pendingSignal == null)
+                return;
+
+            var direction = _pendingSignal.Value;
+            var fired = direction == TradeType.Buy ? Symbol.Ask > _triggerPrice : Symbol.Bid < _triggerPrice;
+            if (!fired)
+                return;
+
+            _pendingSignal = null;
+            _firedSignal = direction;
+            Print("Holy Grail {0} signal fired at {1}.", direction, _triggerPrice);
+
+            if (Chart == null)
+                return;
+
+            var offset = _atr.Result.LastValue * 0.3;
+            var name = "bpm_hg_" + (++_signalCount);
+            if (direction == TradeType.Buy)
+                Chart.DrawIcon(name, ChartIconType.UpArrow, Bars.OpenTimes.LastValue,
+                    Bars.LowPrices.LastValue - offset, Color.FromArgb(255, 80, 220, 120));
+            else
+                Chart.DrawIcon(name, ChartIconType.DownArrow, Bars.OpenTimes.LastValue,
+                    Bars.HighPrices.LastValue + offset, Color.FromArgb(255, 240, 90, 90));
         }
 
         private void ToggleSlowMotion()
@@ -293,12 +384,15 @@ namespace cAlgo.Robots
             _sessionText.FontWeight = FontWeight.Bold;
             _riskText = MakeLine(12);
             _recoveryText = MakeLine(12);
+            _signalText = MakeLine(12);
+            _signalText.IsVisible = SignalEnabled;
             _slowMotionText = MakeLine(12);
             _slowMotionText.IsVisible = IsBacktesting;
 
             panel.AddChild(_sessionText);
             panel.AddChild(_riskText);
             panel.AddChild(_recoveryText);
+            panel.AddChild(_signalText);
             panel.AddChild(_slowMotionText);
 
             var box = new Border
@@ -360,6 +454,29 @@ namespace cAlgo.Robots
             _recoveryText.IsVisible = multiplier > 1;
             _recoveryText.Text = string.Format("RECOVERY ×{0}", multiplier);
             _recoveryText.ForegroundColor = Color.FromArgb(255, 255, 170, 60);
+
+            if (SignalEnabled)
+            {
+                if (_pendingSignal != null)
+                {
+                    _signalText.Text = string.Format("HG {0} @{1}",
+                        _pendingSignal == TradeType.Buy ? "▲" : "▼",
+                        Math.Round(_triggerPrice, Symbol.Digits));
+                    _signalText.ForegroundColor = Color.FromArgb(255, 255, 220, 90);
+                }
+                else if (_firedSignal != null)
+                {
+                    _signalText.Text = _firedSignal == TradeType.Buy ? "HG ▲ LONG NOW" : "HG ▼ SHORT NOW";
+                    _signalText.ForegroundColor = _firedSignal == TradeType.Buy
+                        ? Color.FromArgb(255, 80, 220, 120)
+                        : Color.FromArgb(255, 240, 90, 90);
+                }
+                else
+                {
+                    _signalText.Text = "HG —";
+                    _signalText.ForegroundColor = Color.FromArgb(120, 255, 255, 255);
+                }
+            }
 
             if (IsBacktesting)
             {
