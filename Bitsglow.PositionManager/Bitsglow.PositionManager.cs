@@ -78,6 +78,9 @@ namespace cAlgo.Robots
         [Parameter("Strong Level", DefaultValue = 40, MinValue = 20, MaxValue = 80, Group = "ADX Trend")]
         public int AdxStrongLevel { get; set; }
 
+        [Parameter("Auto Trade", DefaultValue = false, Group = "ADX Trend")]
+        public bool AutoTradeEnabled { get; set; }
+
         private AverageTrueRange _atr;
         private DirectionalMovementSystem _dms;
         private readonly Random _random = new Random();
@@ -85,9 +88,11 @@ namespace cAlgo.Robots
         private DateTime _lastSessionDrawDay = DateTime.MinValue;
         private bool _slowMotion;
         private bool? _wasInSession;
+        private bool _autoTrade;
 
         private TextBlock _sessionText;
         private TextBlock _trendText;
+        private TextBlock _autoText;
         private TextBlock _riskText;
         private TextBlock _recoveryText;
         private TextBlock _slowMotionText;
@@ -98,6 +103,7 @@ namespace cAlgo.Robots
         {
             _atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Exponential);
             _dms = Indicators.DirectionalMovementSystem(AdxPeriod);
+            _autoTrade = AutoTradeEnabled;
 
             RestoreLossStreakFromHistory();
             Positions.Closed += OnPositionClosed;
@@ -108,6 +114,7 @@ namespace cAlgo.Robots
                 Chart.AddHotkey(_ => PlaceOrder(TradeType.Sell), Key.S, ModifierKeys.None);
                 Chart.AddHotkey(_ => PlaceOrder(_random.Next(2) == 0 ? TradeType.Buy : TradeType.Sell), Key.R, ModifierKeys.None);
                 Chart.AddHotkey(_ => ToggleSlowMotion(), Key.D, ModifierKeys.None);
+                Chart.AddHotkey(_ => ToggleAutoTrade(), Key.A, ModifierKeys.None);
                 DrawSessionHighlight();
                 CreateRiskBox();
                 UpdateRiskBox();
@@ -128,8 +135,32 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
+            AutoTrade();
+
             if (Chart != null && Bars.OpenTimes.LastValue.Date != _lastSessionDrawDay)
                 DrawSessionHighlight();
+        }
+
+        // Enters on bar close in the ADX trend direction; PlaceOrder re-checks
+        // session and the one-position guard, so a closed trade re-enters on the
+        // next bar while the trend is still on.
+        private void AutoTrade()
+        {
+            if (!_autoTrade || Positions.Find(TradeLabel, SymbolName) != null || !IsWithinSession(Server.Time))
+                return;
+
+            var i = Bars.Count - 2;
+            if (i < 0 || _dms.ADX[i] < AdxTrendLevel)
+                return;
+
+            PlaceOrder(_dms.DIPlus[i] > _dms.DIMinus[i] ? TradeType.Buy : TradeType.Sell);
+        }
+
+        private void ToggleAutoTrade()
+        {
+            _autoTrade = !_autoTrade;
+            Print("Auto trade {0}.", _autoTrade ? "ON" : "OFF");
+            UpdateRiskBox();
         }
 
         private void ToggleSlowMotion()
@@ -306,6 +337,7 @@ namespace cAlgo.Robots
             _trendText = MakeLine(12);
             _riskText = MakeLine(12);
             _recoveryText = MakeLine(12);
+            _autoText = MakeLine(12);
             _slowMotionText = MakeLine(12);
             _slowMotionText.IsVisible = IsBacktesting;
 
@@ -313,6 +345,7 @@ namespace cAlgo.Robots
             panel.AddChild(_trendText);
             panel.AddChild(_riskText);
             panel.AddChild(_recoveryText);
+            panel.AddChild(_autoText);
             panel.AddChild(_slowMotionText);
 
             var box = new Border
@@ -376,6 +409,11 @@ namespace cAlgo.Robots
             _recoveryText.IsVisible = multiplier > 1;
             _recoveryText.Text = string.Format("RECOVERY ×{0}", multiplier);
             _recoveryText.ForegroundColor = Color.FromArgb(255, 255, 170, 60);
+
+            _autoText.Text = _autoTrade ? "AUTO ON     [A]" : "AUTO OFF    [A]";
+            _autoText.ForegroundColor = _autoTrade
+                ? Color.FromArgb(255, 90, 180, 255)
+                : Color.FromArgb(140, 255, 255, 255);
 
             if (IsBacktesting)
             {
