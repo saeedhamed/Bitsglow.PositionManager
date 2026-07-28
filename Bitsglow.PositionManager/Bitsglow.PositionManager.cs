@@ -69,7 +69,15 @@ namespace cAlgo.Robots
         [Parameter("Tick Delay (ms)", DefaultValue = 10, MinValue = 0, Group = "Backtest Slow Motion")]
         public int TickDelayMs { get; set; }
 
+        [Parameter("Pivot Strength (bars)", DefaultValue = 5, MinValue = 1, Group = "Pivots")]
+        public int PivotStrength { get; set; }
+
         private AverageTrueRange _atr;
+        private double? _lastPivotHigh;
+        private double? _prevPivotHigh;
+        private double? _lastPivotLow;
+        private double? _prevPivotLow;
+        private int _pivotCount;
         private readonly Random _random = new Random();
         private int _lossStreak;
         private DateTime _lastSessionDrawDay = DateTime.MinValue;
@@ -116,8 +124,84 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
+            DetectPivots();
+
             if (Chart != null && Bars.OpenTimes.LastValue.Date != _lastSessionDrawDay)
                 DrawSessionHighlight();
+        }
+
+        // A pivot is a bar whose high (or low) is the extreme of PivotStrength bars
+        // on each side, confirmed once the right side has fully closed.
+        private void DetectPivots()
+        {
+            var center = Bars.Count - 2 - PivotStrength;
+            if (center < PivotStrength)
+                return;
+
+            if (IsPivot(center, true))
+                OnPivot(true, Bars.HighPrices[center], center);
+            if (IsPivot(center, false))
+                OnPivot(false, Bars.LowPrices[center], center);
+        }
+
+        private bool IsPivot(int center, bool isHigh)
+        {
+            for (var j = center - PivotStrength; j <= center + PivotStrength; j++)
+            {
+                if (j == center)
+                    continue;
+                if (isHigh && Bars.HighPrices[j] >= Bars.HighPrices[center])
+                    return false;
+                if (!isHigh && Bars.LowPrices[j] <= Bars.LowPrices[center])
+                    return false;
+            }
+
+            return true;
+        }
+
+        private void OnPivot(bool isHigh, double value, int index)
+        {
+            // Downtrend = lower pivot highs AND lower pivot lows currently in place.
+            var downtrend = _prevPivotHigh.HasValue && _prevPivotLow.HasValue &&
+                            _lastPivotHigh < _prevPivotHigh && _lastPivotLow < _prevPivotLow;
+            var lastSameType = isHigh ? _lastPivotHigh : _lastPivotLow;
+            var reversalWarning = downtrend && lastSameType.HasValue && value > lastSameType.Value;
+
+            if (isHigh)
+            {
+                _prevPivotHigh = _lastPivotHigh;
+                _lastPivotHigh = value;
+            }
+            else
+            {
+                _prevPivotLow = _lastPivotLow;
+                _lastPivotLow = value;
+            }
+
+            if (Chart != null)
+            {
+                var time = Bars.OpenTimes[index];
+                var offset = _atr.Result.LastValue * 0.25;
+                var name = "bpm_pivot_" + (++_pivotCount);
+
+                if (reversalWarning)
+                {
+                    var y = isHigh ? value + offset : value - offset;
+                    Chart.DrawIcon(name, ChartIconType.Star, time, y, Color.Gold);
+                    Chart.DrawText(name + "_txt", "SLOW", time, isHigh ? y + offset : y - offset, Color.Gold);
+                }
+                else if (isHigh)
+                    Chart.DrawIcon(name, ChartIconType.DownTriangle, time, value + offset, Color.FromArgb(200, 240, 90, 90));
+                else
+                    Chart.DrawIcon(name, ChartIconType.UpTriangle, time, value - offset, Color.FromArgb(200, 80, 220, 120));
+            }
+
+            if (reversalWarning && IsBacktesting && !_slowMotion)
+            {
+                _slowMotion = true;
+                Print("Pivot {0} formed above the last one during a downtrend - slow motion ON.",
+                    isHigh ? "high" : "low");
+            }
         }
 
         private void ToggleSlowMotion()
